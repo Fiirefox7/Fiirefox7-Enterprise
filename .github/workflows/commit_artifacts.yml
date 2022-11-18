@@ -1,0 +1,97 @@
+name: Commit Artifacts
+
+on:
+  push:
+    branches: [main, lt/artifacts]
+  # pull_request:
+
+jobs:
+  download_artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18.x
+      - run: npm init -y
+      - run: npm install node-fetch@2
+      - name: Determine artifacts URL
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const cp = require('child_process');
+            const fetch = require('node-fetch');
+            const {CIRCLECI_TOKEN} = process.env;
+
+            function sleep(ms) {
+              return new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            function execHelper(command, options, streamStdout = false) {
+              return new Promise((resolve, reject) => {
+                // We override PATH so that if a script spawns Node or Yarn,
+                // it runs our custom version instead of the default one.
+                const proc = cp.exec(
+                  command,
+                  options,
+                  (error, stdout) => (error ? reject(error) : resolve(stdout.trim())),
+                );
+                if (streamStdout) {
+                  proc.stdout.pipe(process.stdout);
+                }
+              });
+            }
+
+            let artifactsUrl = null;
+            // This is a temporary, dirty hack to avoid needing a GitHub auth token in the circleci
+            // workflow to notify this GitHub action. Sorry.
+            let iter = 0;
+            spinloop: while (iter < 15) {
+              const res = await github.rest.repos.listCommitStatusesForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: context.sha
+              });
+              for (const status of res.data) {
+                if (
+                  status.context === 'ci/circleci: process_artifacts_combined' &&
+                  status.state === 'success'
+                ) {
+                  // The status does not include a build ID, but we can extract it
+                  // from the URL. I couldn't find a better way to do this.
+                  const ciBuildId = /\/facebook\/react\/([0-9]+)/.exec(
+                    status.target_url,
+                  )[1];
+                  if (Number.parseInt(ciBuildId, 10) + '' === ciBuildId) {
+                    artifactsUrl =
+                      `https://circleci.com/api/v1.1/project/github/facebook/react/${ciBuildId}/artifacts`;
+                    break spinloop;
+                  }
+                }
+              }
+              iter++;
+              await sleep(60_000);
+            }
+            const res = await fetch(artifactsUrl);
+            const data = await res.json();
+            console.log({data});
+            for (const artifact of data) {
+              const tarball = artifact.url;
+              console.log({tarball});
+              await execHelper(
+                `curl ${tarball} --header "Circle-Token: ${CIRCLECI_TOKEN}" | tar -xvz`
+              )
+            }
+            await execHelper(`ls -al`);
+
+
+
+
+  # download_artifacts:
+  #   runs-on: ubuntu-latest
+  #   steps:
+      # maybe unzip the tgz then put it in a folder keyed by commit ref
+      #   cuz difftrain can't process the tgz
+      # git commit it to a separate branch
+      #
+      # elsewhere: would be nice to send a status to the pr if the difftrain ci was started and just
+      # say if any failures detected (without any details)
